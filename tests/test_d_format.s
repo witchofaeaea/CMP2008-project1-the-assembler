@@ -1,0 +1,4 @@
+LDUR X1, [X2, #0]
+STUR X3, [X4, #8]
+LDUR X10, [X5, #4]
+STUR X31, [X30, #16]
