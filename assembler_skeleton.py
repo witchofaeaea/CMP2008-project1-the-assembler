@@ -13,10 +13,10 @@ def load_opcode_map():
     return {
         "ADD":  {"format": "R",  "opcode": 0x458}, 
         "SUB":  {"format": "R",  "opcode": 0x658}, 
-        "ADDI": {"format": "I",  "opcode": 0x488}, 
-        "SUBI": {"format": "I",  "opcode": 0x688}, 
-        "LDUR": {"format": "D",  "opcode": 0x7C2}, 
-        "STUR": {"format": "D",  "opcode": 0x7C0}, 
+        "ADDI": {"format": "I",  "opcode": 0x244}, # Fixed 10-bit opcode
+        "SUBI": {"format": "I",  "opcode": 0x344}, # Fixed 10-bit opcode
+        "LDUR": {"format": "D",  "opcode": 0x7C2, "op2": 1}, # Added op2 field
+        "STUR": {"format": "D",  "opcode": 0x7C0, "op2": 3}, # Added op2 field
         "CBZ":  {"format": "CB", "opcode": 0xB4},  
         "B":    {"format": "B",  "opcode": 0x05}   
     }
@@ -27,87 +27,76 @@ def to_twos_complement(val, bits):
         val = (1 << bits) + val
     return val & ((1 << bits) - 1)
 
-def get_reg(reg_str):
-    """Clean and convert register string to integer."""
-    # Remove X, brackets, commas, and spaces
-    for char in "X[], ":
-        reg_str = reg_str.replace(char, "")
-    if reg_str.upper() == "ZR":
-        return 31
-    return int(reg_str)
-
-def get_imm(imm_str):
-    """Clean and extract numeric value from immediate string."""
-    # Remove #, brackets, commas, and spaces
-    for char in "#[], ":
-        imm_str = imm_str.replace(char, "")
-    return int(imm_str)
+def clean_token(token):
+    """Removes X, #, [, ], and commas to get a pure number."""
+    t = token.upper()
+    for char in "X#[],":
+        t = t.replace(char, "")
+    return t
 
 def encode_instruction(line, opcode_map):
     """Return 32-bit integer encoding for a single line of assembly."""
-    # Tokenize by replacing delimiters with spaces then splitting
-    parts = line.replace(',', ' ').replace('[', ' ').replace(']', ' ').split()
-    if not parts:
+    line = line.replace(',', ' ').replace('[', ' ').replace(']', ' ')
+    parts = line.split()
+    
+    if not parts: 
         return None
 
     instr = parts[0].upper()
-    if instr not in opcode_map:
+    if instr not in opcode_map: 
         return 0x11111111
-
+    
     info = opcode_map[instr]
     fmt = info["format"]
     op = info["opcode"]
 
     try:
         if fmt == "R":
-            # [op:11][Rm:5][shamt:6][Rn:5][Rd:5]
-            rd, rn, rm = get_reg(parts[1]), get_reg(parts[2]), get_reg(parts[3])
+            rd = int(clean_token(parts[1]))
+            rn = int(clean_token(parts[2]))
+            rm = int(clean_token(parts[3]))
             return (op << 21) | (rm << 16) | (0 << 10) | (rn << 5) | rd
 
         elif fmt == "I":
-            # [op:10][imm:12][Rn:5][Rd:5]
-            rd, rn, imm = get_reg(parts[1]), get_reg(parts[2]), get_imm(parts[3])
-            imm_bin = to_twos_complement(imm, 12)
-            return (op << 22) | (imm_bin << 10) | (rn << 5) | rd
+            rd = int(clean_token(parts[1]))
+            rn = int(clean_token(parts[2]))
+            imm = to_twos_complement(int(clean_token(parts[3])), 12)
+            return (op << 22) | (imm << 10) | (rn << 5) | rd
 
         elif fmt == "D":
-            # [op:11][imm:9][op2:2][Rn:5][Rt:5]
-            rt, rn, imm = get_reg(parts[1]), get_reg(parts[2]), get_imm(parts[3])
-            imm_bin = to_twos_complement(imm, 9)
-            return (op << 21) | (imm_bin << 12) | (0 << 10) | (rn << 5) | rt
+            rt = int(clean_token(parts[1]))
+            rn = int(clean_token(parts[2]))
+            imm = to_twos_complement(int(clean_token(parts[3])), 9)
+            op2 = info.get("op2", 0) # Pull the specific op2 requirement 
+            return (op << 21) | (imm << 12) | (op2 << 10) | (rn << 5) | rt
 
         elif fmt == "CB":
-            # [op:8][imm:19][Rt:5]
-            rt, imm = get_reg(parts[1]), get_imm(parts[2])
-            imm_bin = to_twos_complement(imm, 19)
-            return (op << 24) | (imm_bin << 5) | rt
+            rt = int(clean_token(parts[1]))
+            imm = to_twos_complement(int(clean_token(parts[2])), 19)
+            return (op << 24) | (imm << 5) | rt
 
         elif fmt == "B":
-            # [op:6][imm:26]
-            imm = get_imm(parts[1])
-            imm_bin = to_twos_complement(imm, 26)
-            return (op << 26) | imm_bin
+            imm = to_twos_complement(int(clean_token(parts[1])), 26)
+            return (op << 26) | imm
 
     except Exception:
         return 0x11111111
-    
+        
     return 0x11111111
 
 def main():
     opcode_map = load_opcode_map()
+    root = Path(__file__).resolve().parent
+    tests_dir = root / "tests"
+    out_dir = root / "outputs"
     
-    # Use absolute paths relative to this script's location
-    root_dir = Path(__file__).resolve().parent
-    tests_dir = root_dir / "tests"
-    outputs_dir = root_dir / "outputs"
-
-    if not outputs_dir.exists():
-        outputs_dir.mkdir(parents=True, exist_ok=True)
+    if not out_dir.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     test_files = sorted(tests_dir.glob("*.s"))
     
     for input_file in test_files:
-        out_path = outputs_dir / f"{input_file.stem}.hex"
+        out_path = out_dir / f"{input_file.stem}.hex"
         
         with input_file.open('r', encoding='utf-8') as fin, \
              out_path.open('w', encoding='utf-8') as fout:
