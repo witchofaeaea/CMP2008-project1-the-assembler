@@ -36,47 +36,107 @@ def to_twos_complement(val, bits):
 
 def tokenize(line):
     """
-    Helper function to clean and split an assembly line into distinct tokens.
-    Removes comments, commas, brackets, 'X' (registers), and '#' (immediates).
+    Upgraded Tokenizer: Safely extracts registers and handles LEGv8 aliases.
     """
+    # Remove comments
     line = line.split('//')[0].split(';')[0].strip()
-    
     if not line:
         return []
 
-    clean_line = line.upper()
-    clean_line = clean_line.replace(',', ' ').replace('[', ' ').replace(']', ' ')
-    clean_line = clean_line.replace('X', '').replace('#', '')
+    # Replace commas and brackets with spaces
+    clean_line = line.replace(',', ' ').replace('[', ' ').replace(']', ' ')
+    raw_tokens = clean_line.split()
     
-    return clean_line.split()
+    parsed_tokens = []
+    for t in raw_tokens:
+        t = t.upper()
+        # Handle special LEGv8 register aliases
+        if t == 'XZR':
+            parsed_tokens.append('31')
+        elif t == 'SP': 
+            parsed_tokens.append('28') # In typical LEGv8 subsets, SP maps to 28
+        elif t == 'FP':
+            parsed_tokens.append('29')
+        elif t == 'LR':
+            parsed_tokens.append('30')
+        # Safely strip 'X' from registers (like X12 -> 12)
+        elif t.startswith('X') and t[1:].isdigit():
+            parsed_tokens.append(t[1:])
+        # Safely strip '#' from immediates (like #-16 -> -16)
+        elif t.startswith('#'):
+            parsed_tokens.append(t[1:])
+        else:
+            parsed_tokens.append(t)
+            
+    return parsed_tokens
 
 
 def encode_instruction(line, opcode_map):
-    """Return 32-bit integer encoding for *line*.
-
-    STUDENT RESPONSIBILITIES:
-      * tokenize the assembly text (remove commas, split whitespace)
-      * lookup format/opcode in opcode_map (built from CSV)
-      * for each format (R, I, D, CB, B) parse tokens to extract registers and immediates
-      * convert immediates to two's complement when negative
-      * assemble the final 32-bit integer with shifts and bitwise OR
-      * return a default constant if not yet implemented so output file
-        still exists (e.g. 0x11111111)
-      * raise errors on unknown instructions
-
-    Reference the LEGv8 quick reference guide for exact bit layouts of each format.
-    """
     machine_code = 0x11111111
 
     tokens = tokenize(line)
     if not tokens:
-        return machine_code # Empty line, though main() usually skips these
+        return machine_code
         
     mnemonic = tokens[0]
     
     if mnemonic not in opcode_map:
-        print(f"Error: Unknown instruction '{mnemonic}'", file=sys.stderr)
         return machine_code
+        
+    fmt, opcode = opcode_map[mnemonic]
+    
+    try:
+        # Using int(..., 0) allows Python to automatically handle base-10 OR base-16 (0x...) inputs
+        
+        if fmt == 'R':
+            rd = int(tokens[1], 0)
+            rn = int(tokens[2], 0)
+            rm = int(tokens[3], 0)
+            shamt = 0 
+            
+            # Edge Case: Support optional shift amounts (e.g., ADD X1, X2, X3, LSL #2)
+            if len(tokens) >= 6 and tokens[4] == 'LSL':
+                shamt = int(tokens[5], 0)
+                
+            machine_code = (opcode << 21) | (rm << 16) | (shamt << 10) | (rn << 5) | rd
+
+        elif fmt == 'I':
+            rd = int(tokens[1], 0)
+            rn = int(tokens[2], 0)
+            imm12 = int(tokens[3], 0)
+            
+            imm12_encoded = to_twos_complement(imm12, 12)
+            machine_code = (opcode << 22) | (imm12_encoded << 10) | (rn << 5) | rd
+
+        elif fmt == 'D':
+            rt = int(tokens[1], 0)
+            rn = int(tokens[2], 0)
+            
+            # Edge Case: Support omitted offset (e.g., LDUR X1, [X2] implies offset 0)
+            offset = int(tokens[3], 0) if len(tokens) > 3 else 0
+            op2 = 0 
+            
+            offset_encoded = to_twos_complement(offset, 9)
+            machine_code = (opcode << 21) | (offset_encoded << 12) | (op2 << 10) | (rn << 5) | rt
+
+        elif fmt == 'CB':
+            rt = int(tokens[1], 0)
+            offset = int(tokens[2], 0)
+            
+            offset_encoded = to_twos_complement(offset, 19)
+            machine_code = (opcode << 24) | (offset_encoded << 5) | rt
+
+        elif fmt == 'B':
+            offset = int(tokens[1], 0)
+            
+            offset_encoded = to_twos_complement(offset, 26)
+            machine_code = (opcode << 26) | offset_encoded
+
+    except (IndexError, ValueError) as e:
+        print(f"Error parsing line '{line}': {e}", file=sys.stderr)
+        return 0x11111111
+
+    return machine_code
         
     fmt, opcode = opcode_map[mnemonic]
     
