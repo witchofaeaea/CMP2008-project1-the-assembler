@@ -4,28 +4,23 @@
 # ID: 2104423
 
 import sys
-import csv
-import glob
 import os
+import glob
 
 def load_opcode_map():
-    """Return a dictionary mapping instruction names to format and opcode.
-       Create the opcode map dictionary with the instruction data.
-    """
-    # Hardcoded map based on the required subset from the project prompt.
-    # Note: I-format opcodes are right-shifted by 1 (e.g., ADDI 1160 >> 1 = 580)
+    """Return a dictionary mapping instruction names to format and opcode."""
+    # Opcode mapping based on LEGv8 specifications
     opcode_map = {
-        'ADD':  ('R', 1112),
-        'SUB':  ('R', 1624),
-        'ADDI': ('I', 580),
-        'SUBI': ('I', 836),
-        'LDUR': ('D', 1986),
-        'STUR': ('D', 1984),
-        'CBZ':  ('CB', 180),
-        'B':    ('B', 5)
+        "ADD":  {"format": "R",  "opcode": 0x458}, # 1112 in decimal
+        "SUB":  {"format": "R",  "opcode": 0x658}, # 1624 in decimal
+        "ADDI": {"format": "I",  "opcode": 0x488}, # 1160-1161
+        "SUBI": {"format": "I",  "opcode": 0x688}, # 1672-1673
+        "LDUR": {"format": "D",  "opcode": 0x7C2}, # 1986
+        "STUR": {"format": "D",  "opcode": 0x7C0}, # 1984
+        "CBZ":  {"format": "CB", "opcode": 0xB4},  # 180
+        "B":    {"format": "B",  "opcode": 0x05}   # 5
     }
     return opcode_map
-
 
 def to_twos_complement(val, bits):
     """Convert signed integer to two's complement representation in 'bits' width."""
@@ -33,186 +28,75 @@ def to_twos_complement(val, bits):
         val = (1 << bits) + val
     return val & ((1 << bits) - 1)
 
+def get_reg(reg_str):
+    """Helper to convert register string like 'X15' or 'XZR' to integer."""
+    reg_str = reg_str.upper().replace('X', '').replace('[', '').replace(']', '').replace(',', '')
+    if reg_str == 'ZR':
+        return 31
+    return int(reg_str)
 
-def tokenize(line):
-    """
-    Upgraded Tokenizer: Safely extracts registers and handles LEGv8 aliases.
-    """
-    # Remove comments
-    line = line.split('//')[0].split(';')[0].strip()
-    if not line:
-        return []
-
-    # Replace commas and brackets with spaces
-    clean_line = line.replace(',', ' ').replace('[', ' ').replace(']', ' ')
-    raw_tokens = clean_line.split()
-    
-    parsed_tokens = []
-    for t in raw_tokens:
-        t = t.upper()
-        # Handle special LEGv8 register aliases
-        if t == 'XZR':
-            parsed_tokens.append('31')
-        elif t == 'SP': 
-            parsed_tokens.append('28') # In typical LEGv8 subsets, SP maps to 28
-        elif t == 'FP':
-            parsed_tokens.append('29')
-        elif t == 'LR':
-            parsed_tokens.append('30')
-        # Safely strip 'X' from registers (like X12 -> 12)
-        elif t.startswith('X') and t[1:].isdigit():
-            parsed_tokens.append(t[1:])
-        # Safely strip '#' from immediates (like #-16 -> -16)
-        elif t.startswith('#'):
-            parsed_tokens.append(t[1:])
-        else:
-            parsed_tokens.append(t)
-            
-    return parsed_tokens
-
+def get_imm(imm_str):
+    """Helper to extract numeric value from '#10' or '#-5'."""
+    return int(imm_str.replace('#', '').replace(',', '').replace(']', ''))
 
 def encode_instruction(line, opcode_map):
-    machine_code = 0x11111111
-
-    tokens = tokenize(line)
+    """Return 32-bit integer encoding for *line*."""
+    # Tokenize: remove commas and brackets, then split
+    clean_line = line.replace(',', ' ').replace('[', ' ').replace(']', ' ')
+    tokens = clean_line.split()
+    
     if not tokens:
-        return machine_code
-        
-    mnemonic = tokens[0]
-    
-    if mnemonic not in opcode_map:
-        return machine_code
-        
-    fmt, opcode = opcode_map[mnemonic]
-    
-    try:
-        # Using int(..., 0) allows Python to automatically handle base-10 OR base-16 (0x...) inputs
-        
-        if fmt == 'R':
-            rd = int(tokens[1], 0)
-            rn = int(tokens[2], 0)
-            rm = int(tokens[3], 0)
-            shamt = 0 
-            
-            # Edge Case: Support optional shift amounts (e.g., ADD X1, X2, X3, LSL #2)
-            if len(tokens) >= 6 and tokens[4] == 'LSL':
-                shamt = int(tokens[5], 0)
-                
-            machine_code = (opcode << 21) | (rm << 16) | (shamt << 10) | (rn << 5) | rd
-
-        elif fmt == 'I':
-            rd = int(tokens[1], 0)
-            rn = int(tokens[2], 0)
-            imm12 = int(tokens[3], 0)
-            
-            imm12_encoded = to_twos_complement(imm12, 12)
-            machine_code = (opcode << 22) | (imm12_encoded << 10) | (rn << 5) | rd
-
-        elif fmt == 'D':
-            rt = int(tokens[1], 0)
-            rn = int(tokens[2], 0)
-            
-            # Edge Case: Support omitted offset (e.g., LDUR X1, [X2] implies offset 0)
-            offset = int(tokens[3], 0) if len(tokens) > 3 else 0
-            op2 = 0 
-            
-            offset_encoded = to_twos_complement(offset, 9)
-            machine_code = (opcode << 21) | (offset_encoded << 12) | (op2 << 10) | (rn << 5) | rt
-
-        elif fmt == 'CB':
-            rt = int(tokens[1], 0)
-            offset = int(tokens[2], 0)
-            
-            offset_encoded = to_twos_complement(offset, 19)
-            machine_code = (opcode << 24) | (offset_encoded << 5) | rt
-
-        elif fmt == 'B':
-            offset = int(tokens[1], 0)
-            
-            offset_encoded = to_twos_complement(offset, 26)
-            machine_code = (opcode << 26) | offset_encoded
-
-    except (IndexError, ValueError) as e:
-        print(f"Error parsing line '{line}': {e}", file=sys.stderr)
         return 0x11111111
 
-    return machine_code
-        
-    fmt, opcode = opcode_map[mnemonic]
-    
+    instr = tokens[0].upper()
+    if instr not in opcode_map:
+        raise ValueError(f"Unknown instruction: {instr}")
+
+    info = opcode_map[instr]
+    fmt = info["format"]
+    op = info["opcode"]
+    res = 0
+
     try:
-        # ----------------------------------------
-        # R-Format: ADD Rd, Rn, Rm
-        # Layout: Opcode (11) | Rm (5) | shamt (6) | Rn (5) | Rd (5)
-        # ----------------------------------------
-        if fmt == 'R':
-            rd = int(tokens[1])
-            rn = int(tokens[2])
-            rm = int(tokens[3])
-            shamt = 0 # shamt is 0 for basic ADD/SUB
-            
-            machine_code = (opcode << 21) | (rm << 16) | (shamt << 10) | (rn << 5) | rd
+        if fmt == "R":
+            # ADD Rd, Rn, Rm -> [op:11][Rm:5][shamt:6][Rn:5][Rd:5]
+            rd = get_reg(tokens[1])
+            rn = get_reg(tokens[2])
+            rm = get_reg(tokens[3])
+            res = (op << 21) | (rm << 16) | (0 << 10) | (rn << 5) | rd
 
-        # ----------------------------------------
-        # I-Format: ADDI Rd, Rn, #imm
-        # Layout: Opcode (10) | imm12 (12) | Rn (5) | Rd (5)
-        # ----------------------------------------
-        elif fmt == 'I':
-            rd = int(tokens[1])
-            rn = int(tokens[2])
-            imm12 = int(tokens[3])
-            
-            imm12_encoded = to_twos_complement(imm12, 12)
-            machine_code = (opcode << 22) | (imm12_encoded << 10) | (rn << 5) | rd
+        elif fmt == "I":
+            # ADDI Rd, Rn, #imm -> [op:10][imm:12][Rn:5][Rd:5]
+            rd = get_reg(tokens[1])
+            rn = get_reg(tokens[2])
+            imm = to_twos_complement(get_imm(tokens[3]), 12)
+            res = (op << 22) | (imm << 10) | (rn << 5) | rd
 
-        # ----------------------------------------
-        # D-Format: LDUR Rt, [Rn, #offset]
-        # Layout: Opcode (11) | address (9) | op2 (2) | Rn (5) | Rt (5)
-        # ----------------------------------------
-        elif fmt == 'D':
-            rt = int(tokens[1])
-            rn = int(tokens[2])
-            offset = int(tokens[3])
-            op2 = 0 # op2 is 0 for basic LDUR/STUR
-            
-            offset_encoded = to_twos_complement(offset, 9)
-            machine_code = (opcode << 21) | (offset_encoded << 12) | (op2 << 10) | (rn << 5) | rt
+        elif fmt == "D":
+            # LDUR Rt, [Rn, #imm] -> [op:11][imm:9][op2:2][Rn:5][Rt:5]
+            rt = get_reg(tokens[1])
+            rn = get_reg(tokens[2])
+            imm = to_twos_complement(get_imm(tokens[3]), 9)
+            res = (op << 21) | (imm << 12) | (0 << 10) | (rn << 5) | rt
 
-        # ----------------------------------------
-        # CB-Format: CBZ Rt, offset
-        # Layout: Opcode (8) | address (19) | Rt (5)
-        # ----------------------------------------
-        elif fmt == 'CB':
-            rt = int(tokens[1])
-            offset = int(tokens[2])
-            
-            offset_encoded = to_twos_complement(offset, 19)
-            machine_code = (opcode << 24) | (offset_encoded << 5) | rt
+        elif fmt == "CB":
+            # CBZ Rt, #imm -> [op:8][imm:19][Rt:5]
+            rt = get_reg(tokens[1])
+            imm = to_twos_complement(get_imm(tokens[2]), 19)
+            res = (op << 24) | (imm << 5) | rt
 
-        # ----------------------------------------
-        # B-Format: B offset
-        # Layout: Opcode (6) | address (26)
-        # ----------------------------------------
-        elif fmt == 'B':
-            offset = int(tokens[1])
-            
-            offset_encoded = to_twos_complement(offset, 26)
-            machine_code = (opcode << 26) | offset_encoded
+        elif fmt == "B":
+            # B #imm -> [op:6][imm:26]
+            imm = to_twos_complement(get_imm(tokens[1]), 26)
+            res = (op << 26) | imm
 
-    except (IndexError, ValueError) as e:
-        print(f"Error parsing line '{line}': {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"Error parsing line '{line}': {e}")
         return 0x11111111
 
-    return machine_code
-
+    return res
 
 def main():
-    """Assemble every .s file under tests/ and write a corresponding .hex file.
-
-    Students do not need to modify this function; it's provided so they can
-    focus on the encoding logic.  Grading script will run this module and
-    compare outputs in the outputs/ directory against expected results.
-    """
     opcode_map = load_opcode_map()
 
     if not os.path.exists("outputs"):
@@ -221,7 +105,7 @@ def main():
     test_files = sorted(glob.glob("tests/*.s"))
     if not test_files:
         print("No test files found", file=sys.stderr)
-        sys.exit(1)
+        return
 
     for input_file in test_files:
         base = os.path.splitext(os.path.basename(input_file))[0]
@@ -234,7 +118,6 @@ def main():
                 code = encode_instruction(line, opcode_map)
                 if code is not None:
                     fout.write(f"0x{code:08X}\n")
-
 
 if __name__ == "__main__":
     main()
